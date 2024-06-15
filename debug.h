@@ -10,12 +10,8 @@
 #include <errno.h>
 #include <err.h>
 
-#if __has_builtin(__builtin_debugtrap)  // This is expected to work for Clang/LLVM.
-#define breakpoint  __builtin_debugtrap
-#else  // Manually generate a break point otherwise.
 // [NOTE] __builtin_trap() can stop code emitting afterwards thus is not used here.
 #define breakpoint()  ({ __asm("int3"); })  // [XXX] This assumes x86_64. Change it on your own need.
-#endif  /* __builtin_debugtrap */
 
 static int begin_debug(bool external = false)
 {
