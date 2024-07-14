@@ -11,7 +11,15 @@
 #include <err.h>
 
 // [NOTE] __builtin_trap() can stop code emitting afterwards thus is not used here.
-#define breakpoint()  ({ __asm("int3"); })  // [XXX] This assumes x86_64. Change it on your own need.
+#if defined(__i386__) || defined(__amd64__)
+#define breakpoint()  do { __asm__("int3"); } while(0)
+#elif defined(__arm__) || defined(__aarch64__)
+#define breakpoint()  do { __asm__("bkpt #0"); } while(0)
+#elif !defined(breakpoint)
+#warning "macro `breakpoint()' unavailable"
+#endif  /* breakpoint */
+
+#define DEBUG_IGNORE_VALUE(expr)  do if((expr)) { } while(0)
 
 static int begin_debug(bool external = false)
 {
@@ -21,7 +29,7 @@ static int begin_debug(bool external = false)
       if(file == NULL) return -1;
 
       char buf[64] = {0};
-      fgets(buf, sizeof buf, file);
+      DEBUG_IGNORE_VALUE(fgets(buf, sizeof buf, file));
       fclose(file);
 
       char *end;
@@ -77,7 +85,7 @@ static int begin_debug(bool external = false)
 
     static void default_sigtrap_handler(int) {
       char msg[] = "FATAL: SIGTRAP received without a proper debugger attached\n";
-      write(STDERR_FILENO, msg, sizeof msg - 1);
+      DEBUG_IGNORE_VALUE(write(STDERR_FILENO, msg, sizeof msg - 1));
       _exit(1);
     }
 
@@ -140,6 +148,7 @@ static int begin_debug(bool external = false)
   //   * We didn't disable ptrace scope protection for the child process
   char pid_s[64];
   sprintf(pid_s, "%lld", (long long)pid);
+  // [NOTE] Adapt it to "lldb", etc. on your own demand.
   execlp("gdb", "gdb",
       //"--quiet",
       "--eval-command", "set pagination off",  // Avoid being blocked by screen height.
