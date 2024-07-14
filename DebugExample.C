@@ -7,7 +7,7 @@ void DebugExample()
 {
   begin_debug();
 
-  int a = 0;
+  volatile int a = 0;
   printf("\nDirection: Trap break points and change variables in GDB.\n");
   printf("Instruction: (in GDB)\n");
   printf("  > Type `set variable a = 1` and ENTER.\n");
