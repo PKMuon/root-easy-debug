@@ -50,21 +50,15 @@ static int begin_debug(bool external = false)
       return pid;
     }
 
-    static void sigcont_handler(int) { /* do nothing */ }
-
     static void wait_for_tracer() {
       sigset_t sigset;
-      assign_sigset_not_to_wait(&sigset);
-      sighandler_t sigcont_handler_old = signal(SIGCONT, sigcont_handler);
+      assign_sigset_to_wait(&sigset);
       while(tracer_pid() <= 0) {  // False signal eliminated.
-        // All signals not in sigset must have been blocked before tracer can initiate one.
+        // All signals in sigset must have been blocked before tracer can initiate one.
         // So we have no chance to miss any signal from tracer.
-        sigsuspend(&sigset);
-        // P.S. On my PC, seemingly equivalent sigwait() didn't work as 'signal SIGCONT'
-        // from external GDB didn't make it return, while internal GDB did.
-        // I strongly suspect this is an issue of GDB 15.0.50.20240403-0ubuntu1.
+        int sig;
+        sigwait(&sigset, &sig);
       }
-      signal(SIGCONT, sigcont_handler_old);
     }
 
     static int disable_ptrace_restriction() {
@@ -91,22 +85,22 @@ static int begin_debug(bool external = false)
       sigemptyset(sigset);
       sigaddset(sigset, SIGCONT);
     }
-
-    static void assign_sigset_not_to_wait(sigset_t *sigset) {
-      sigfillset(sigset);
-      sigdelset(sigset, SIGCONT);
-    }
   };
 
-  if(external) {
-    if(Inner::disable_ptrace_restriction() < 0) {
-      int e = errno;
-      warnx("external ptrace disabled by Yama ptrace_scope");
-      signal(SIGTRAP, Inner::default_sigtrap_handler);
-      errno = e;
-      return -1;
-    }
+  if(external && Inner::disable_ptrace_restriction() < 0) {
+    int e = errno;
+    warnx("external ptrace disabled by Yama ptrace_scope");
+    signal(SIGTRAP, Inner::default_sigtrap_handler);
+    errno = e;
+    return -1;
+  }
 
+  // Block signals to wait.
+  sigset_t sigset, sigset_old;
+  Inner::assign_sigset_to_wait(&sigset);
+  sigprocmask(SIG_BLOCK, /* restrict */&sigset, /* restrict */&sigset_old);
+
+  if(external) {
     printf("\nNow run the following command in another terminal:\n\n    ");
     //printf("cgdb");
     printf("gdb");
@@ -116,14 +110,12 @@ static int begin_debug(bool external = false)
     printf(" --eval-command '%s'", "set pagination on");
     printf(" --pid %d", getpid());
     printf("\n");
+
+    // Restore signal mask after synchronization.
     Inner::wait_for_tracer();
+    sigprocmask(SIG_SETMASK, &sigset_old, NULL);
     return 0;
   }
-
-  // Block signals to wait.
-  sigset_t sigset, sigset_old;
-  Inner::assign_sigset_to_wait(&sigset);
-  sigprocmask(SIG_BLOCK, /* restrict */&sigset, /* restrict */&sigset_old);
 
   pid_t pid = fork();
   if(pid < 0) {
