@@ -60,6 +60,9 @@ static int begin_debug(bool external = false)
         // All signals not in sigset must have been blocked before tracer can initiate one.
         // So we have no chance to miss any signal from tracer.
         sigsuspend(&sigset);
+        // P.S. On my PC, seemingly equivalent sigwait() didn't work as 'signal SIGCONT'
+        // from external GDB didn't make it return, while internal GDB did.
+        // I strongly suspect this is an issue of GDB 15.0.50.20240403-0ubuntu1.
       }
       signal(SIGCONT, sigcont_handler_old);
     }
