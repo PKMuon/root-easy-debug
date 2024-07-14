@@ -16,7 +16,7 @@
 static int begin_debug(bool external = false)
 {
   struct Inner {
-    static int ptrace_scope() {
+    static int ptrace_scope() {  // >=0: see ptrace(2); <0: error
       FILE *file = fopen("/proc/sys/kernel/yama/ptrace_scope", "r");
       if(file == NULL) return -1;
 
@@ -30,7 +30,7 @@ static int begin_debug(bool external = false)
       return value;
     }
 
-    static int tracer_pid() {
+    static int tracer_pid() {  // >=0: tracer pid; <0: error
       pid_t pid = -1;
 
       FILE *file = fopen("/proc/self/status", "r");
@@ -53,11 +53,29 @@ static int begin_debug(bool external = false)
     static void sigcont_handler(int) { /* do nothing */ }
 
     static void wait_for_tracer() {
+      sigset_t sigset;
+      assign_sigset_not_to_wait(&sigset);
+      sighandler_t sigcont_handler_old = signal(SIGCONT, sigcont_handler);
       while(tracer_pid() <= 0) {  // False signal eliminated.
-        sighandler_t old_sigcont_handler = signal(SIGCONT, sigcont_handler);
-        pause();
-        signal(SIGCONT, old_sigcont_handler);
+        // All signals not in sigset must have been blocked before tracer can initiate one.
+        // So we have no chance to miss any signal from tracer.
+        sigsuspend(&sigset);
       }
+      signal(SIGCONT, sigcont_handler_old);
+    }
+
+    static int disable_ptrace_restriction() {
+      int scope = Inner::ptrace_scope();
+      if(scope <= 0) {  /* 0: classic ptrace permissions */
+        // We assume no Yama ptrace protection here.
+      } else if(scope == 1) {  /* restricted ptrace */
+        // Enable non-direct-ancestor ptrace for external debuggers.
+        prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+      } else {  /* admin-only attach or no attach */
+        // We give up external ptrace and return an error.
+        return -1;
+      }
+      return 0;
     }
 
     static void default_sigtrap_handler(int) {
@@ -65,18 +83,30 @@ static int begin_debug(bool external = false)
       write(STDERR_FILENO, msg, sizeof msg - 1);
       _exit(1);
     }
+
+    static void assign_sigset_to_wait(sigset_t *sigset) {
+      sigemptyset(sigset);
+      sigaddset(sigset, SIGCONT);
+    }
+
+    static void assign_sigset_not_to_wait(sigset_t *sigset) {
+      sigfillset(sigset);
+      sigdelset(sigset, SIGCONT);
+    }
   };
 
   if(external) {
-    if(Inner::ptrace_scope() == 1) {
-      // Enable non-direct-ancestor ptrace for external debuggers.
-      prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+    if(Inner::disable_ptrace_restriction() < 0) {
+      int e = errno;
+      warnx("external ptrace disabled by Yama ptrace_scope");
+      signal(SIGTRAP, Inner::default_sigtrap_handler);
+      errno = e;
+      return -1;
     }
 
-    printf("\nNow run the following command in another terminal:\n");
-    printf("\n");
-    //printf("    cgdb");
-    printf("    gdb");
+    printf("\nNow run the following command in another terminal:\n\n    ");
+    //printf("cgdb");
+    printf("gdb");
     //printf(" --quiet");
     printf(" --eval-command '%s'", "set pagination off");  // Avoid being blocked by screen height.
     printf(" --eval-command '%s'", "signal SIGCONT");
@@ -87,6 +117,11 @@ static int begin_debug(bool external = false)
     return 0;
   }
 
+  // Block signals to wait.
+  sigset_t sigset, sigset_old;
+  Inner::assign_sigset_to_wait(&sigset);
+  sigprocmask(SIG_BLOCK, /* restrict */&sigset, /* restrict */&sigset_old);
+
   pid_t pid = fork();
   if(pid < 0) {
     int e = errno;
@@ -96,12 +131,18 @@ static int begin_debug(bool external = false)
     return -1;
   }
 
+  // Restore signal mask after synchronization.
   if(pid == 0) {  // child
     Inner::wait_for_tracer();
+    sigprocmask(SIG_SETMASK, &sigset_old, NULL);
     return 0;
   }
+  sigprocmask(SIG_SETMASK, &sigset_old, NULL);
 
-  // Run GDB to attach process pid.
+  // Run GDB to attach to process pid.
+  // DONOT use CGDB here for the following reasons:
+  //   * Output of the program would interleave with CGDB
+  //   * We didn't disable ptrace scope protection for the child process
   char pid_s[64];
   sprintf(pid_s, "%lld", (long long)pid);
   execlp("gdb", "gdb",
@@ -112,6 +153,7 @@ static int begin_debug(bool external = false)
       "--pid", pid_s, NULL);
 
   // Handle execlp failure.
+  // Killing child process cancels everything because it is always kept suspended.
   warn("execlp");
   int e = errno;
   kill(pid, SIGKILL);
